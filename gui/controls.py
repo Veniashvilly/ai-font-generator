@@ -1,80 +1,69 @@
-"""Три ползунка с единым интерфейсом получения и выставления значений."""
-
+"""All advanced controls, compact notebook layout."""
 import tkinter as tk
 from tkinter import ttk
-from typing import Callable
+from engine.workflow import DEFAULTS
 
-# Диапазоны совпадают с engine.workflow.normalize_spec.
 SLIDER_CONFIG = {
-    "width": ("Ширина", 0.55, 1.40),
-    "slant": ("Наклон", -20.0, 20.0),
-    "spacing": ("Интервал", 0.0, 100.0),
+    'width': ('Ширина', .55, 1.4), 'slant': ('Наклон', -20, 20),
+    'spacing': ('Интервал', -20, 100), 'weight_scale': ('Жирность', .75, 1.35),
+    'counter_scale': ('Размер очка', .7, 1.3), 'corner_roundness': ('Скругление', 0, .45),
+    'serif_length': ('Длина', .005, .12), 'serif_thickness': ('Толщина', .005, .09),
+    'serif_bracket': ('Сопряжение', 0, .09), 'serif_angle': ('Угол', -25, 25),
 }
 
-
 class SliderPanel(ttk.LabelFrame):
-    """Сам интерфейс не сохраняет состояние — этим занимается FontSession."""
-
-    def __init__(self, parent, on_release: Callable[[], None]):
-        super().__init__(parent, text="Параметры шрифта", padding=12)
-        self.variables = {}
-        self.scales = {}
-        self.labels = {}
+    def __init__(self, parent, on_release):
+        super().__init__(parent, text='Параметры шрифта', padding=6)
+        self.variables, self.scales, self.labels = {}, {}, {}
         self._loading = False
-
-        for row, (field, (title, start, end)) in enumerate(SLIDER_CONFIG.items()):
-            ttk.Label(self, text=title).grid(row=row * 2, column=0, sticky="w", pady=(9, 0))
-            value_text = ttk.Label(self, width=9, anchor="e")
-            value_text.grid(row=row * 2, column=1, sticky="e", pady=(9, 0))
-
-            variable = tk.DoubleVar(value=1.0 if field == "width" else 0.0)
-            scale = ttk.Scale(
-                self,
-                variable=variable,
-                from_=start,
-                to=end,
-                command=lambda _v, f=field: self._update_label(f),
-            )
-            scale.grid(row=row * 2 + 1, column=0, columnspan=2, sticky="ew", pady=(0, 9))
-            scale.bind("<ButtonRelease-1>", lambda _event: on_release())
-            # Позволяет менять значения с клавиатуры, а не только мышкой.
-            scale.bind("<KeyRelease>", lambda _event: on_release())
-            self.variables[field] = variable
-            self.scales[field] = scale
-            self.labels[field] = value_text
-
         self.columnconfigure(0, weight=1)
-        self.set_values({"width": 1.0, "slant": 0.0, "spacing": 0})
+        tabs = ttk.Notebook(self)
+        tabs.grid(row=0, column=0, sticky='ew')
+        for title, fields in [('Основные', list(SLIDER_CONFIG)[:3]), ('Форма', list(SLIDER_CONFIG)[3:6]), ('Засечки', list(SLIDER_CONFIG)[6:])]:
+            frame = ttk.Frame(tabs, padding=4)
+            frame.columnconfigure(0, weight=1)
+            tabs.add(frame, text=title)
+            offset = 0
+            if title == 'Засечки':
+                ttk.Label(frame, text='Тип засечек').grid(row=0,column=0,sticky='w')
+                self.variables['serif_style'] = tk.StringVar(value='none')
+                self.style_choice = ttk.Combobox(frame, textvariable=self.variables['serif_style'], values=('none','slab','wedge','bracket'), state='readonly', width=12)
+                self.style_choice.grid(row=0,column=1,sticky='e')
+                self.style_choice.bind('<<ComboboxSelected>>', lambda e:on_release())
+                offset = 1
+            for i, field in enumerate(fields):
+                label, low, high = SLIDER_CONFIG[field]
+                row = offset+i*2
+                ttk.Label(frame,text=label).grid(row=row,column=0,sticky='w')
+                self.labels[field] = ttk.Label(frame,width=8,anchor='e')
+                self.labels[field].grid(row=row,column=1,sticky='e')
+                var = self.variables[field] = tk.DoubleVar(value=DEFAULTS[field])
+                scale = self.scales[field] = ttk.Scale(frame,variable=var,from_=low,to=high,command=lambda v,f=field:self._update_label(f))
+                scale.grid(row=row+1,column=0,columnspan=2,sticky='ew',pady=(0,3))
+                scale.bind('<ButtonRelease-1>',lambda e:on_release())
+                scale.bind('<KeyRelease>',lambda e:on_release())
+        self.set_values(DEFAULTS)
         self.set_enabled(False)
 
-    def _update_label(self, field: str):
-        if self._loading:
-            return
-        value = self.get_values()[field]
-        if field == "width":
-            text = f"{value:.2f}×"
-        elif field == "slant":
-            text = f"{value:+.1f}°"
-        else:
-            text = str(value)
-        self.labels[field].configure(text=text)
+    def _update_label(self, field):
+        if not self._loading and field in self.labels:
+            self.labels[field].configure(text=f'{self._value(field):.4g}')
 
-    def get_values(self) -> dict:
-        """Округляем дробные значения и приводим spacing к int."""
-        return {
-            "width": round(self.variables["width"].get(), 2),
-            "slant": round(self.variables["slant"].get(), 1),
-            "spacing": int(round(self.variables["spacing"].get())),
-        }
+    def _value(self, field):
+        v = self.variables[field].get()
+        if field == 'serif_style': return v
+        if field == 'spacing': return int(round(v))
+        return v
 
-    def set_values(self, params: dict):
+    def get_values(self):
+        return {f:self._value(f) for f in self.variables}
+
+    def set_values(self, params):
         self._loading = True
-        for field in SLIDER_CONFIG:
-            self.variables[field].set(params[field])
+        for f,var in self.variables.items(): var.set(params.get(f, DEFAULTS[f]))
         self._loading = False
-        for field in SLIDER_CONFIG:
-            self._update_label(field)
+        for f in self.labels:self._update_label(f)
 
-    def set_enabled(self, enabled: bool):
-        for slider in self.scales.values():
-            slider.configure(state="normal" if enabled else "disabled")
+    def set_enabled(self, enabled):
+        for s in self.scales.values():s.configure(state='normal' if enabled else 'disabled')
+        self.style_choice.configure(state='readonly' if enabled else 'disabled')

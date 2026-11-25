@@ -20,7 +20,7 @@ import sys
 from ai.designer import create_patch, create_spec
 from engine.preview import create_preview
 from engine.session_state import FontSession
-from engine.workflow import generate_from_spec
+from engine.workflow import generate_from_spec, EFFECT_FIELDS
 
 
 def show_preview(ttf_path):
@@ -38,13 +38,13 @@ def print_state(session: FontSession):
     print("\nСессия:", session.data["session_id"])
     print("ТЕКУЩИЕ параметры:", session.params)
     print("Последний готовый TTF:", session.latest_ttf)
-    if session.is_dirty:
+    if session.needs_export:
         print("Есть изменения ползунков: текущий TTF ещё НЕ пересоздан.")
     print("Последняя версия в истории:", session.history[-1]["id"])
 
 
 def interactive(session: FontSession):
-    print("\nКоманды: width 1.1 | slant 3 | spacing 20 | state | history | exit")
+    print("\nКоманды: любой параметр + значение | save | state | history | exit")
     print("Любая другая фраза отправится в GigaChat как правка.")
     print("ID сессии для продолжения позже:", session.data["session_id"])
     print_state(session)
@@ -64,10 +64,19 @@ def interactive(session: FontSession):
                 print(version["id"], version["kind"], version["params"])
             continue
 
-        parts = request.replace(",", ".").split()
-        if len(parts) == 2 and parts[0] in {"width", "slant", "spacing"}:
+        if request.casefold() == "save":
             try:
-                value = int(parts[1]) if parts[0] == "spacing" else float(parts[1])
+                ttf, _ = session.save_current()
+                print("TTF:", ttf)
+                show_preview(ttf)
+            except (ValueError, OSError, RuntimeError) as error:
+                print("Ошибка сохранения:", error)
+            continue
+
+        parts = request.replace(",", ".").split()
+        if len(parts) == 2 and parts[0] in EFFECT_FIELDS:
+            try:
+                value = parts[1] if parts[0] == "serif_style" else int(parts[1]) if parts[0] == "spacing" else float(parts[1])
                 changed = session.set_slider(parts[0], value)
                 print("Ползунок:", parts[0], "=", value)
                 print("Черновик сохранён." if changed else "Значение не изменилось.")

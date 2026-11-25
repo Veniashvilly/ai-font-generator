@@ -3,7 +3,6 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from gigachat import GigaChat
 
 
 # Корневая папка нашего проекта.
@@ -18,6 +17,8 @@ def ask_gigachat(prompt: str) -> str:
     Отправляет запрос в GigaChat и возвращает
     текстовый ответ нейросети.
     """
+
+    from gigachat import GigaChat
 
     # Получаем API-ключ.
     credentials = os.getenv("GIGACHAT_CREDENTIALS")

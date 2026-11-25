@@ -22,7 +22,7 @@ from PIL import Image
 from engine.session_state import FontSession
 from gui.controls import SliderPanel
 from gui.preview_panel import PreviewPanel
-from gui.tasks import make_draft_preview, read_preview, revise_from_prompt, start_from_prompt
+from gui.tasks import make_draft_preview, read_preview, revise_from_prompt, start_from_prompt, export_current
 
 
 class FontEditorWindow(tk.Tk):
@@ -37,6 +37,7 @@ class FontEditorWindow(tk.Tk):
         self.notifications: queue.Queue = queue.Queue()
         self.preview_serial = 0        # Версии запросов предпросмотра; устаревшие игнорируем.
         self.preview_after_id = None
+        self.draft_running = False
 
         style = ttk.Style(self)
         if "clam" in style.theme_names():
@@ -115,6 +116,9 @@ class FontEditorWindow(tk.Tk):
         self.open_button = ttk.Button(actions, text="Папка с TTF", command=self._open_output)
         self.open_button.grid(row=0, column=1, sticky="ew", padx=(3, 0))
 
+        self.export_button = ttk.Button(actions, text="Сохранить TTF", command=self._export_current)
+        self.export_button.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(4,0))
+
         resume_box = ttk.LabelFrame(right, text="Продолжить сессию по ID", padding=9)
         resume_box.grid(row=4, column=0, sticky="ew", pady=(10, 0))
         resume_box.columnconfigure(0, weight=1)
@@ -140,6 +144,7 @@ class FontEditorWindow(tk.Tk):
         self.new_button.configure(state="disabled" if value else "normal")
         self.resume_button.configure(state="disabled" if value else "normal")
         self.open_button.configure(state="normal" if self.session else "disabled")
+        self.export_button.configure(state="normal" if self.session and not value else "disabled")
 
     def _run_background(self, kind: str, fn, *args, **kwargs):
         """Все тяжёлые операции — в фоновом потоке, никогда в Tkinter."""
@@ -150,6 +155,19 @@ class FontEditorWindow(tk.Tk):
             except Exception as error:
                 self.notifications.put((kind, None, error))
         threading.Thread(target=runner, daemon=True).start()
+
+    def _export_current(self):
+        if self.busy or not self.session:
+            return
+        try:
+            self._save_sliders(schedule_preview=False)
+        except (ValueError, RuntimeError, OSError) as error:
+            self._error(error)
+            return
+        self._set_busy(True)
+        self._invalidate_previews()
+        self.status.set("Сохранение и проверка TTF…")
+        self._run_background("export", export_current, self.session)
 
     def _send_prompt(self):
         if self.busy:
@@ -224,6 +242,10 @@ class FontEditorWindow(tk.Tk):
         self.preview_after_id = None
         if self.busy or not self.session or serial != self.preview_serial:
             return
+        if self.draft_running:
+            self.preview_after_id = self.after(550, lambda: self._run_draft_preview(serial))
+            return
+        self.draft_running = True
         snapshot = self.session.params
         self._run_background("draft", self._produce_draft_preview, snapshot, serial)
 
@@ -242,9 +264,11 @@ class FontEditorWindow(tk.Tk):
             while True:
                 kind, payload, error = self.notifications.get_nowait()
                 if kind == "draft":
+                    self.draft_running = False
                     # payload: (serial, PIL Image) — оформляется в _run_draft_preview.
                     if error is not None:
-                        self.status.set(f"Ошибка предпросмотра черновика: {error}")
+                        if not self.busy and self.session:
+                            self.status.set(f"Ошибка предпросмотра черновика: {error}")
                     else:
                         serial, picture = payload
                         if serial == self.preview_serial and not self.busy:
@@ -266,9 +290,9 @@ class FontEditorWindow(tk.Tk):
                         session, picture, message = payload
                         self.session = session
                         self._load_from_session(picture)
-                        self.status.set("Шрифт создан! Можно менять ползунки или писать правки.")
+                        self.status.set("Шрифт создан и проверен. " + message)
                         self.prompt_box.delete("1.0", "end")
-                elif kind == "revise":
+                elif kind in ("revise", "export"):
                     self._set_busy(False)
                     if error:
                         self._error(error)
@@ -276,8 +300,9 @@ class FontEditorWindow(tk.Tk):
                     else:
                         picture, message, generated = payload
                         self._load_from_session(picture)
-                        self.status.set("ИИ применил изменения и обновил TTF." if generated else "ИИ вернул уже имеющиеся настройки.")
-                        self.prompt_box.delete("1.0", "end")
+                        self.status.set(("TTF сохранён и проверен." if generated else "Использован уже готовый TTF.") + " " + message)
+                        if kind == "revise":
+                            self.prompt_box.delete("1.0", "end")
         except queue.Empty:
             pass
         self.after(120, self._drain_results)
@@ -303,12 +328,13 @@ class FontEditorWindow(tk.Tk):
                 "initial": "ИИ создал",
                 "manual_snapshot": "Ползунки сохранены",
                 "ai_revision": "ИИ изменил",
+                "manual_export": "TTF сохранён вручную",
             }.get(version["kind"], version["kind"])
             lines.append(
                 f"{version['id']} · {action} · ширина {p['width']}, "
-                f"наклон {p['slant']}°, интервал {p['spacing']}"
+                f"наклон {p['slant']}°, интервал {p['spacing']}; жирность {p['weight_scale']}, очко {p['counter_scale']}, скругление {p['corner_roundness']}; засечки {p['serif_style']} ({p['serif_length']}, {p['serif_thickness']}, {p['serif_bracket']}, {p['serif_angle']})"
             )
-        if self.session.is_dirty:
+        if self.session.needs_export:
             lines.append("Черновик · ручные изменения, ещё не зафиксированы как версия")
         self.history_box.configure(state="normal")
         self.history_box.delete("1.0", "end")
@@ -335,7 +361,7 @@ class FontEditorWindow(tk.Tk):
         self._update_history()
         self._set_busy(False)
         self.status.set("Сессия восстановлена из sessions/.../state.json")
-        if session.is_dirty:
+        if session.needs_export:
             self._schedule_draft_preview()
         else:
             self._run_background("saved", self._read_saved_preview, session.latest_ttf, self.preview_serial)

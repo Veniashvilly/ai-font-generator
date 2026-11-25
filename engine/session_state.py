@@ -21,11 +21,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from engine.catalog import ROOT
-from engine.workflow import generate_from_spec, normalize_spec
+from engine.workflow import generate_from_spec, normalize_spec, EFFECT_FIELDS, FIELDS
 
 SESSIONS_DIR = ROOT / "sessions"
-SLIDER_FIELDS = {"width", "slant", "spacing"}
-SPEC_FIELDS = ("base_font", "width", "slant", "spacing", "script")
+SLIDER_FIELDS = EFFECT_FIELDS
+SPEC_FIELDS = FIELDS
 
 
 def _timestamp() -> str:
@@ -77,6 +77,10 @@ class FontSession:
     def __init__(self, path: Path, data: dict):
         self.path = Path(path)
         self.data = data
+        # Миграция старых сессий в памяти; запись только при следующем сохранении.
+        self.data["current_params"] = _params_only(data["current_params"])
+        for version in self.data["versions"]:
+            version["params"] = _params_only(version["params"])
 
     @classmethod
     def start(
@@ -140,6 +144,15 @@ class FontSession:
     def is_dirty(self) -> bool:
         return bool(self.data["draft_dirty"])
 
+    @property
+    def needs_export(self) -> bool:
+        latest = next(v for v in reversed(self.data["versions"]) if v["ttf"])
+        return self.params != latest["params"]
+
+    def save_current(self) -> tuple[Path, bool]:
+        return self.apply_ai_patch({k: self.params[k] for k in SLIDER_FIELDS},
+                                   self.data["revision"], "Ручное сохранение TTF", kind="manual_export")
+
     def _save(self) -> None:
         _write_json(self.path, self.data)
 
@@ -200,6 +213,7 @@ class FontSession:
         patch: dict,
         expected_revision: int,
         message: str = "",
+        *, kind: str = "ai_revision",
     ) -> tuple[Path, bool]:
         """Событие 3: применяем ответ модели поверх текущих настроек.
 
@@ -209,7 +223,7 @@ class FontSession:
         """
         self._assert_revision(expected_revision)
         if not isinstance(patch, dict) or not patch or set(patch) - SLIDER_FIELDS:
-            raise ValueError("От ИИ допускаются только width, slant, spacing")
+            raise ValueError("Недопустимые поля правки")
 
         merged = _params_only({**self.params, **patch})
         last_generated = next(
@@ -221,10 +235,10 @@ class FontSession:
         # когда перед ним был ручной снимок ползунков.
         if merged == last_generated["params"]:
             previous = self.data["versions"][-1]
-            if merged != previous["params"]:
+            if merged != previous["params"] or merged != self.data["current_params"] or self.data["draft_dirty"]:
                 self.data["versions"].append({
                     "id": f"v{len(self.data['versions']) + 1}",
-                    "kind": "ai_revision",
+                    "kind": kind,
                     "created_at": _timestamp(),
                     "parent": previous["id"],
                     "params": copy.deepcopy(merged),
@@ -247,7 +261,7 @@ class FontSession:
         previous = self.data["versions"][-1]
         self.data["versions"].append({
             "id": f"v{len(self.data['versions']) + 1}",
-            "kind": "ai_revision",
+            "kind": kind,
             "created_at": _timestamp(),
             "parent": previous["id"],
             "params": copy.deepcopy(merged),

@@ -9,7 +9,8 @@
 import json
 from typing import Callable
 
-from engine.workflow import normalize_spec
+from engine.workflow import normalize_spec, DEFAULTS, EFFECT_FIELDS, FIELDS
+from engine.advanced_generator import AdvancedConfig
 from ai.client import ask_gigachat
 from ai.prompts import initial_prompt, load_candidates, revision_prompt
 from engine.language import detect_script
@@ -98,7 +99,6 @@ def create_spec(request: str, ask: LLM = ask_gigachat) -> tuple[dict, str]:
     файла: Python может сопоставить его с существующим каталогом сам.
     Это предотвращает дополнительные ошибки JSON и лишние API-вызовы.
     """
-    import math
 
     candidates = load_candidates(request)
     if not candidates:
@@ -107,9 +107,8 @@ def create_spec(request: str, ask: LLM = ask_gigachat) -> tuple[dict, str]:
     answer = _ask_json(initial_prompt(request, candidates), ask)
     params = answer["parameters"]
     required = {"base_font", "width", "slant", "spacing"}
-
-    if set(params) != required:
-        raise ValueError("Ожидались base_font, width, slant, spacing")
+    if not required <= set(params) or set(params) - (EFFECT_FIELDS | {"base_font"}):
+        raise ValueError("Некорректный набор параметров первой генерации")
 
     ids = [candidate["id"] for candidate in candidates]
     chosen = params["base_font"]
@@ -140,24 +139,16 @@ def create_spec(request: str, ask: LLM = ask_gigachat) -> tuple[dict, str]:
     # Числа от модели не считаем заведомо корректными. Не округляем и
     # не зажимаем произвольные значения: заменяем ошибочные значениями,
     # которые безопасны для текущего движка.
-    for field, minimum, maximum, default in (
-        ("width", 0.55, 1.4, 1.0),
-        ("slant", -20, 20, 0.0),
-        ("spacing", 0, 100, 0),
-    ):
-        value = params[field]
-        valid_type = type(value) is int if field == "spacing" else type(value) in (int, float)
-        valid = (
-            valid_type
-            and math.isfinite(value)
-            and minimum <= value <= maximum
-        )
-        if valid:
-            clean[field] = value
-        else:
-            clean[field] = default
-            print(f"Параметр {field}={value!r} недопустим, использую {default}")
-            notes.append(f"{field} заменён безопасным значением {default}")
+    for field in sorted(EFFECT_FIELDS):
+        value = params.get(field, DEFAULTS[field])
+        try:
+            AdvancedConfig.from_dict({field: value})
+        except (ValueError, TypeError, OverflowError):
+            value = DEFAULTS[field]
+            notes.append(f"{field} заменён безопасным значением {value}")
+        if field not in params:
+            notes.append(f"{field} не указан, использовано {value}")
+        clean[field] = value
 
     # Последняя строгая проверка существования TTF и диапазонов.
     spec = normalize_spec({**clean, "script": detect_script(request)})
@@ -172,12 +163,9 @@ def create_patch(request: str, previous: dict, ask: LLM = ask_gigachat) -> tuple
     answer = _ask_json(revision_prompt(request, previous), ask)
     patch = answer["parameters"]
 
-    if not patch or not set(patch).issubset({"width", "slant", "spacing"}):
+    if not patch or not set(patch).issubset(EFFECT_FIELDS):
         raise ValueError("ИИ не указал допустимые изменения")
 
-    current = {
-        field: previous[field]
-        for field in ("base_font", "width", "slant", "spacing")
-    }
-    normalize_spec({**current, "script": previous.get("script", "auto"), **patch})
+    current = normalize_spec({k: previous[k] for k in FIELDS if k in previous})
+    normalize_spec({**current, **patch})
     return patch, answer["message"]

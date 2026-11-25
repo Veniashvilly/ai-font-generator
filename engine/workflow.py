@@ -1,15 +1,18 @@
 """Единая точка входа для параметров от человека или ИИ (пока без API)."""
 
 import json
-import math
+from dataclasses import asdict
+from engine.advanced_generator import AdvancedConfig
+from engine.advanced_ai_contract import PARAMETER_HELP
 from pathlib import Path
 
 from engine.catalog import FONTS_DIR, OUTPUT_DIR, list_fonts
-from engine.generator import generate_font
+from engine.integrated_generation import generate_integrated
 from engine.language import SCRIPTS
 
-FIELDS = {"base_font", "width", "slant", "spacing", "script"}
-DEFAULTS = {"width": 1.0, "slant": 0.0, "spacing": 0, "script": "auto"}
+EFFECT_FIELDS = frozenset(PARAMETER_HELP)
+FIELDS = EFFECT_FIELDS | {"base_font", "script"}
+DEFAULTS = {**asdict(AdvancedConfig()), "script": "auto"}
 
 
 def load_json(path: Path) -> dict:
@@ -22,6 +25,8 @@ def load_json(path: Path) -> dict:
 
 def normalize_spec(data: dict) -> dict:
     """Проверяем JSON. Значения, которые может вернуть ИИ, не доверяем без проверки."""
+    if not isinstance(data, dict):
+        raise ValueError("Ожидался JSON-объект")
     unknown = set(data) - FIELDS
     if unknown:
         raise ValueError(f"Неизвестные параметры: {', '.join(sorted(unknown))}")
@@ -34,40 +39,19 @@ def normalize_spec(data: dict) -> dict:
     if base_font not in existing:
         raise ValueError(f"Шрифт {base_font!r} не найден в fonts/base")
 
+    if not existing[base_font].resolve().is_relative_to(FONTS_DIR.resolve()):
+        raise ValueError("Недопустимый путь к шрифту")
     spec = {**DEFAULTS, **data}
     if not isinstance(spec["script"], str) or spec["script"] not in SCRIPTS:
         raise ValueError("script должен быть latin, cyrillic, both или auto")
-    for field, minimum, maximum in (
-        ("width", 0.55, 1.4),
-        ("slant", -20, 20),
-    ):
-        value = spec[field]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise ValueError(f"{field}: требуется конечное число")
-        if not minimum <= value <= maximum:
-            raise ValueError(f"{field}: диапазон от {minimum} до {maximum}")
-
-    spacing = spec["spacing"]
-    if type(spacing) is not int or not 0 <= spacing <= 100:
-        raise ValueError("spacing: требуется целое число от 0 до 100")
+    AdvancedConfig.from_dict({key: spec[key] for key in EFFECT_FIELDS})
     return spec
 
 
 def generate_from_spec(data: dict, parent_version: str | None = None) -> Path:
     """Генерируем TTF из JSON. Сохраняем связь с предыдущей версией."""
     spec = normalize_spec(data)
-    source = FONTS_DIR / spec["base_font"]
-    result = generate_font(
-        source, float(spec["width"]), float(spec["slant"]), spec["spacing"], script=spec["script"]
-    )
-    # generator.py уже создал params.json, добавляем связь версий.
-    params_path = result.parent / "params.json"
-    params = load_json(params_path)
-    params["parent_version"] = parent_version
-    params_path.write_text(
-        json.dumps(params, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    return result
+    return generate_integrated(spec, OUTPUT_DIR, parent_version)
 
 
 def revise(previous_params_path: Path, changes: dict) -> Path:
